@@ -1,5 +1,23 @@
 const db = require('../config/db');
 
+// --- HELPER: Función rápida para guardar en auditoría ---
+const auditar = async (req, accion, tabla, idAfectado, datosNuevos, datosAnteriores = null) => {
+    try {
+        const idUsuario = req.usuario ? req.usuario.id : 1; // ID 1 por defecto si no hay token
+        const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+        
+        await db.query(
+            `INSERT INTO auditoria_logs 
+            (id_usuario, accion, tabla_afectada, id_registro_afectado, datos_nuevos, datos_anteriores, ip_origen) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [idUsuario, accion, tabla, idAfectado, datosNuevos, datosAnteriores, ip]
+        );
+    } catch (e) {
+        console.error("⚠️ Error guardando auditoría:", e.message);
+        // No detenemos el flujo principal si falla la auditoría
+    }
+};
+
 // 1. OBTENER CATALOGOS
 exports.getCatalogos = async (req, res) => {
     try {
@@ -28,7 +46,7 @@ exports.getTDRs = async (req, res) => {
             LEFT JOIN cat_tipos_proceso cat ON t.id_tipo_proceso = cat.id_tipo_proceso
             LEFT JOIN cat_direcciones dir ON t.id_direccion_solicitante = dir.id_direccion
             LEFT JOIN cat_estados_tdr est ON t.id_estado = est.id_estado
-            WHERE t.eliminado_logico = false  -- FILTRO IMPORTANTE
+            WHERE t.eliminado_logico = false  
             ORDER BY t.id_tdr DESC
         `;
         const result = await db.query(sql);
@@ -45,6 +63,7 @@ exports.createTDR = async (req, res) => {
     try {
         const numero_tdr = d.numero_tdr || `TDR-${Date.now()}`;
         const anio_fiscal = d.anio_fiscal || new Date().getFullYear();
+        // ... (resto de tus variables) ...
         const id_tipo_proceso = d.id_tipo_proceso;
         const id_direccion_solicitante = d.id_direccion_solicitante;
         const objeto_contratacion = d.objeto_contratacion || 'Sin Objeto';
@@ -53,8 +72,6 @@ exports.createTDR = async (req, res) => {
         const fecha_inicio = d.fecha_inicio_contrato || null;
         const fecha_fin = d.fecha_fin_contrato || null;
         const id_usuario_responsable = d.id_usuario || 1; 
-
-        // Estado Borrador por defecto (1)
         let id_estado = 1;
 
         const sql = `
@@ -71,7 +88,16 @@ exports.createTDR = async (req, res) => {
         const values = [numero_tdr, anio_fiscal, id_tipo_proceso, id_direccion_solicitante, id_usuario_responsable, id_estado, objeto_contratacion, presupuesto_referencial, partida_presupuestaria, fecha_inicio, fecha_fin];
 
         const result = await db.query(sql, values);
-        res.json({ message: 'TDR creado', tdr: result.rows[0] });
+        
+        // 🚨 AUDITORIA: CREAR
+        const nuevoTdr = result.rows[0];
+        await auditar(req, 'CREAR', 'TDR', nuevoTdr.id_tdr, {
+            numero_tdr: nuevoTdr.numero_tdr,
+            objeto: nuevoTdr.objeto_contratacion,
+            presupuesto: nuevoTdr.presupuesto_referencial
+        });
+
+        res.json({ message: 'TDR creado', tdr: nuevoTdr });
 
     } catch (error) {
         console.error("Error createTDR:", error.message);
@@ -79,12 +105,15 @@ exports.createTDR = async (req, res) => {
     }
 };
 
-// 4. ACTUALIZAR TDR (¡NUEVO!)
+// 4. ACTUALIZAR TDR
 exports.updateTDR = async (req, res) => {
     const { id } = req.params;
     const d = req.body;
     
     try {
+        // Primero obtenemos el dato anterior para auditoría
+        const oldData = await db.query('SELECT * FROM tdr WHERE id_tdr = $1', [id]);
+        
         const sql = `
             UPDATE tdr SET
                 objeto_contratacion = $1,
@@ -111,9 +140,13 @@ exports.updateTDR = async (req, res) => {
 
         const result = await db.query(sql, values);
         
-        if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'TDR no encontrado' });
-        }
+        if (result.rowCount === 0) return res.status(404).json({ error: 'TDR no encontrado' });
+
+        // 🚨 AUDITORIA: ACTUALIZAR
+        await auditar(req, 'ACTUALIZAR', 'TDR', id, 
+            { objeto: d.objeto_contratacion, presupuesto: d.presupuesto_referencial }, // Datos Nuevos
+            oldData.rows[0] ? { objeto: oldData.rows[0].objeto_contratacion, presupuesto: oldData.rows[0].presupuesto_referencial } : null // Datos Anteriores
+        );
 
         res.json({ message: 'TDR actualizado correctamente', tdr: result.rows[0] });
     } catch (error) {
@@ -122,37 +155,41 @@ exports.updateTDR = async (req, res) => {
     }
 };
 
-// 5. ELIMINAR TDR (LOGICO) (¡NUEVO!)
+// 5. ELIMINAR TDR
 exports.deleteTDR = async (req, res) => {
     const { id } = req.params;
     try {
-        // CAMBIO IMPORTANTE: Usamos DELETE para borrarlo de verdad
+        // Obtenemos datos antes de borrar
+        const oldData = await db.query('SELECT * FROM tdr WHERE id_tdr = $1', [id]);
+
         const sql = 'DELETE FROM tdr WHERE id_tdr = $1 RETURNING id_tdr'; 
-        
         const result = await db.query(sql, [id]);
 
-        if (result.rowCount === 0) {
-            return res.status(404).json({ error: 'TDR no encontrado' });
+        if (result.rowCount === 0) return res.status(404).json({ error: 'TDR no encontrado' });
+
+        // 🚨 AUDITORIA: ELIMINAR
+        if(oldData.rows.length > 0) {
+            await auditar(req, 'ELIMINAR', 'TDR', id, null, {
+                numero_tdr: oldData.rows[0].numero_tdr,
+                objeto: oldData.rows[0].objeto_contratacion
+            });
         }
 
-        res.json({ message: 'TDR eliminado permanentemente de la base de datos' });
+        res.json({ message: 'TDR eliminado permanentemente' });
     } catch (error) {
         console.error(error);
-        // OJO: Si el TDR ya tiene contratos creados, la base de datos podría impedirte borrarlo
-        // por seguridad (Foreign Key Constraint).
         res.status(500).json({ error: 'Error al eliminar: Es posible que este TDR tenga datos asociados.' });
     }
 };
-// 6. OBTENER TDR POR ID (AGREGA ESTO AL FINAL)
+
+// 6. OBTENER TDR POR ID
 exports.getTdrById = async (req, res) => {
     const { id } = req.params;
     try {
         const sql = 'SELECT * FROM tdr WHERE id_tdr = $1';
         const result = await db.query(sql, [id]);
 
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'TDR no encontrado' });
-        }
+        if (result.rows.length === 0) return res.status(404).json({ error: 'TDR no encontrado' });
 
         res.json(result.rows[0]);
     } catch (error) {

@@ -1,22 +1,27 @@
 const db = require('../config/db');
 
-// 1. OBTENER CATÁLOGOS (Áreas y Supervisores)
+// --- HELPER: Función rápida para auditoría ---
+const auditar = async (req, accion, tabla, idAfectado, datosNuevos, datosAnteriores = null) => {
+    try {
+        const idUsuario = req.usuario ? req.usuario.id : 1; 
+        const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '0.0.0.0';
+        
+        await db.query(
+            `INSERT INTO auditoria_logs 
+            (id_usuario, accion, tabla_afectada, id_registro_afectado, datos_nuevos, datos_anteriores, ip_origen) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [idUsuario, accion, tabla, idAfectado, datosNuevos, datosAnteriores, ip]
+        );
+    } catch (e) { console.error("⚠️ Error guardando auditoría:", e.message); }
+};
+
+// 1. OBTENER CATÁLOGOS
 exports.getCatalogos = async (req, res) => {
     try {
-        console.log("📡 Solicitando catálogos desde el Frontend..."); // Log para verificar conexión
-
-        // Consulta de Áreas
         const areas = await db.query("SELECT id_direccion, nombre_direccion FROM cat_direcciones WHERE activo = true ORDER BY nombre_direccion ASC");
-        
-        // Consulta de Supervisores
         const supervisores = await db.query("SELECT id_usuario, nombres || ' ' || apellidos as nombre_completo FROM usuarios WHERE activo = true");
-
-        res.json({
-            areas: areas.rows,
-            supervisores: supervisores.rows
-        });
+        res.json({ areas: areas.rows, supervisores: supervisores.rows });
     } catch (error) {
-        console.error("❌ Error en getCatalogos:", error);
         res.status(500).json({ error: 'Error al cargar listas desplegables' });
     }
 };
@@ -36,7 +41,6 @@ exports.getContratos = async (req, res) => {
         const result = await db.query(sql);
         res.json(result.rows);
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Error al listar contratos' });
     }
 };
@@ -46,25 +50,20 @@ exports.getContratoById = async (req, res) => {
     const { id } = req.params;
     try {
         const result = await db.query('SELECT * FROM contratos_profesionales WHERE id_contrato = $1', [id]);
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Contrato no encontrado' });
-        }
+        if (result.rows.length === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
         res.json(result.rows[0]);
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Error al buscar contrato' });
     }
 };
 
-// 4. CREAR CONTRATO (CORREGIDO)
+// 4. CREAR CONTRATO (CON LOGS PARA DETECTAR ERRORES)
 exports.createContrato = async (req, res) => {
     const d = req.body;
+    console.log("🚀 [BACKEND] Iniciando creación de contrato:", d.nombre); // LOG 1
+
     try {
         const numContrato = d.numero || `CTR-${Date.now()}`;
-
-        // --- LIMPIEZA DE DATOS (AQUÍ ESTÁ EL TRUCO) ---
-        // Si d.idArea es "" (string vacío) o undefined, le asignamos NULL.
-        // Lo mismo para el supervisor.
         const idAreaSafe = (d.idArea === "" || d.idArea === "undefined") ? null : d.idArea;
         const idSupervisorSafe = (d.idSupervisor === "" || d.idSupervisor === "undefined") ? null : d.idSupervisor;
 
@@ -77,22 +76,28 @@ exports.createContrato = async (req, res) => {
             RETURNING *
         `;
         
-        const values = [
-            numContrato, 
-            d.cedula, 
-            d.nombre, 
-            d.honorarios, 
-            d.inicio, 
-            d.fin, 
-            idAreaSafe,       // <--- Usamos la variable limpia
-            idSupervisorSafe, // <--- Usamos la variable limpia
-            d.objeto_contrato
-        ];
+        const values = [numContrato, d.cedula, d.nombre, d.honorarios, d.inicio, d.fin, idAreaSafe, idSupervisorSafe, d.objeto_contrato];
         
         const result = await db.query(sql, values);
-        res.status(201).json(result.rows[0]);
+        const nuevoC = result.rows[0];
+        console.log("✅ [BACKEND] Contrato guardado en BD:", nuevoC.numero_contrato); // LOG 2
+        
+        // 🚨 AUDITORIA: CREAR
+        try {
+            console.log("📝 [BACKEND] Intentando guardar en Auditoría..."); // LOG 3
+            await auditar(req, 'CREAR', 'CONTRATOS', nuevoC.id_contrato, {
+                numero_contrato: nuevoC.numero_contrato,
+                nombre_profesional: nuevoC.nombre_completo_profesional,
+                cargo: nuevoC.objeto_contrato
+            });
+            console.log("🎉 [BACKEND] ¡Auditoría guardada con éxito!"); // LOG 4
+        } catch (auditError) {
+            console.error("❌ [BACKEND] Error AL GUARDAR AUDITORIA:", auditError);
+        }
+
+        res.status(201).json(nuevoC);
     } catch (error) {
-        console.error("Error Crear:", error); // Esto te mostrará el error real en la consola de VS Code
+        console.error("🔥 [BACKEND] Error FATAL en createContrato:", error); 
         res.status(500).json({ error: 'Error al crear contrato' });
     }
 };
@@ -102,6 +107,8 @@ exports.updateContrato = async (req, res) => {
     const { id } = req.params;
     const d = req.body;
     try {
+        const oldData = await db.query('SELECT * FROM contratos_profesionales WHERE id_contrato = $1', [id]);
+
         const sql = `
             UPDATE contratos_profesionales SET
                 nombre_completo_profesional = $1,
@@ -119,6 +126,12 @@ exports.updateContrato = async (req, res) => {
         const result = await db.query(sql, values);
         if (result.rowCount === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
         
+        // 🚨 AUDITORIA: ACTUALIZAR
+        await auditar(req, 'ACTUALIZAR', 'CONTRATOS', id, 
+            { nombre_profesional: d.nombre, honorarios: d.honorarios },
+            oldData.rows[0] ? { nombre_profesional: oldData.rows[0].nombre_completo_profesional, honorarios: oldData.rows[0].honorarios_mensuales } : null
+        );
+
         res.json({ message: 'Actualizado correctamente', contrato: result.rows[0] });
     } catch (error) {
         console.error("Error Update:", error);
@@ -130,8 +143,19 @@ exports.updateContrato = async (req, res) => {
 exports.deleteContrato = async (req, res) => {
     const { id } = req.params;
     try {
+        const oldData = await db.query('SELECT * FROM contratos_profesionales WHERE id_contrato = $1', [id]);
+
         const result = await db.query("DELETE FROM contratos_profesionales WHERE id_contrato = $1", [id]);
         if (result.rowCount === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
+
+        // 🚨 AUDITORIA: ELIMINAR
+        if(oldData.rows.length > 0) {
+            await auditar(req, 'ELIMINAR', 'CONTRATOS', id, null, {
+                numero_contrato: oldData.rows[0].numero_contrato,
+                nombre_profesional: oldData.rows[0].nombre_completo_profesional
+            });
+        }
+
         res.json({ message: 'Eliminado correctamente' });
     } catch (error) {
         console.error(error);

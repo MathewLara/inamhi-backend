@@ -39,7 +39,7 @@ exports.registrarUsuario = async (req, res) => {
             RETURNING id_usuario, username, email;
         `;
         
-        const rolFinal = id_rol || 2; 
+        const rolFinal = id_rol || 2; // Por defecto rol 2 (técnico/invitado)
         const result = await db.query(sqlInsert, [rolFinal, username, passwordHash, nombres, apellidos, email]);
 
         res.json({
@@ -53,7 +53,7 @@ exports.registrarUsuario = async (req, res) => {
     }
 };
 
-// 2. LOGIN DE USUARIO (VERSION UNICA Y CORREGIDA)
+// 2. LOGIN DE USUARIO (CON PROTECCIÓN DE ROL PARA FRONTEND Y BACKEND)
 exports.login = async (req, res) => {
     const { username, password } = req.body;
     
@@ -62,7 +62,7 @@ exports.login = async (req, res) => {
     }
 
     try {
-        // Buscamos al usuario real y su rol
+        // Buscamos al usuario real y unimos con la tabla roles
         const sql = `
             SELECT u.*, r.nombre_rol 
             FROM usuarios u 
@@ -77,27 +77,30 @@ exports.login = async (req, res) => {
 
         const usuarioBD = result.rows[0];
 
-        // Validamos la contraseña
+        // Validamos la contraseña con bcrypt
         const passwordValido = await bcrypt.compare(password, usuarioBD.password_hash);
         if (!passwordValido) {
             return res.status(401).json({ message: '⛔ Contraseña incorrecta' });
         }
 
-        // Generamos el Token
+        // Generamos el Token incluyendo el rol (Protección de Backend)
         const token = jwt.sign(
-            { id: usuarioBD.id_usuario, rol: usuarioBD.nombre_rol }, 
+            { 
+                id: usuarioBD.id_usuario, 
+                rol: usuarioBD.nombre_rol // Incluimos el rol en el token
+            }, 
             'SECRETO_SUPER_SECRETO', 
             { expiresIn: '8h' }
         );
 
-        // RESPUESTA: Mapeamos 'nombres' (de la BD) a 'nombre' (para el Frontend)
+        // RESPUESTA AL FRONTEND: Cumple el paso 3 para el *ngIf
         res.json({ 
             message: '✅ Bienvenido', 
             token, 
             usuario: { 
                 id: usuarioBD.id_usuario,
-                nombre: usuarioBD.nombres, // Aquí enviará 'Juan' o 'Roberto'
-                rol: usuarioBD.nombre_rol,
+                nombre: usuarioBD.nombres, 
+                rol: usuarioBD.nombre_rol, // Este es el que lee tu app.ts para esAdmin
                 email: usuarioBD.email 
             } 
         });
