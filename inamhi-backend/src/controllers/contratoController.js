@@ -1,178 +1,140 @@
 const db = require('../config/db');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 
-// --- CONFIGURACIÓN DE MULTER (Para subir archivos) ---
-// Asegúrate de crear la carpeta 'uploads' en la raíz de tu proyecto o ajusta la ruta
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        const uploadPath = path.join(__dirname, '../../uploads'); // Sube dos niveles para salir de src/controllers
-        // Si la carpeta no existe, la crea (opcional, pero recomendado manejar esto manualmente antes)
-        if (!fs.existsSync(uploadPath)){
-            fs.mkdirSync(uploadPath, { recursive: true });
-        }
-        cb(null, uploadPath);
-    },
-    filename: function (req, file, cb) {
-        // Guarda el archivo con fecha + nombre original para evitar duplicados
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + '-' + file.originalname);
+// 1. OBTENER CATÁLOGOS (Áreas y Supervisores)
+exports.getCatalogos = async (req, res) => {
+    try {
+        console.log("📡 Solicitando catálogos desde el Frontend..."); // Log para verificar conexión
+
+        // Consulta de Áreas
+        const areas = await db.query("SELECT id_direccion, nombre_direccion FROM cat_direcciones WHERE activo = true ORDER BY nombre_direccion ASC");
+        
+        // Consulta de Supervisores
+        const supervisores = await db.query("SELECT id_usuario, nombres || ' ' || apellidos as nombre_completo FROM usuarios WHERE activo = true");
+
+        res.json({
+            areas: areas.rows,
+            supervisores: supervisores.rows
+        });
+    } catch (error) {
+        console.error("❌ Error en getCatalogos:", error);
+        res.status(500).json({ error: 'Error al cargar listas desplegables' });
     }
-});
+};
 
-const upload = multer({ storage: storage });
-
-// 1. Middleware para usar en la ruta (exportamos el 'single' upload)
-exports.uploadMiddleware = upload.single('archivo');
-
-
-// --- FUNCIONES DEL CONTROLADOR ---
-
-// GET: Obtener todos los contratos
+// 2. LISTAR CONTRATOS
 exports.getContratos = async (req, res) => {
     try {
-        const result = await db.query('SELECT * FROM contratos ORDER BY id_contrato DESC');
+        const sql = `
+            SELECT c.*, 
+                   dir.nombre_direccion, 
+                   u.nombres || ' ' || u.apellidos as nombre_supervisor
+            FROM contratos_profesionales c
+            LEFT JOIN cat_direcciones dir ON c.id_direccion_solicitante = dir.id_direccion
+            LEFT JOIN usuarios u ON c.id_usuario_supervisor = u.id_usuario
+            ORDER BY c.id_contrato DESC
+        `;
+        const result = await db.query(sql);
         res.json(result.rows);
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Error al obtener contratos' });
+        res.status(500).json({ error: 'Error al listar contratos' });
     }
 };
 
-// GET: Obtener catálogos (Ejemplo genérico, ajusta según tus tablas reales)
-exports.getCatalogos = async (req, res) => {
+// 3. OBTENER UN CONTRATO POR ID
+exports.getContratoById = async (req, res) => {
+    const { id } = req.params;
     try {
-        // Si tienes tablas de catálogos (ej: tipos_contrato), haz las consultas aquí
-        // Por ahora devolvemos un objeto vacío para que no falle la ruta
-        const tipos = await db.query('SELECT * FROM tipo_contrato'); // Ejemplo
-        res.json({
-            tiposContrato: tipos.rows,
-            // Agrega más catálogos si es necesario
-        });
-    } catch (error) {
-        console.error("Error en catalogos (puede que la tabla no exista):", error.message);
-        res.json({ mensaje: "Catálogos no configurados aún" }); 
-    }
-};
-
-// POST: Crear contrato
-exports.createContrato = async (req, res) => {
-    const { nombre, descripcion, fecha_inicio, fecha_fin, monto } = req.body;
-    try {
-        const sql = `
-            INSERT INTO contratos (nombre, descripcion, fecha_inicio, fecha_fin, monto, estado)
-            VALUES ($1, $2, $3, $4, $5, 'ACTIVO')
-            RETURNING *
-        `;
-        const result = await db.query(sql, [nombre, descripcion, fecha_inicio, fecha_fin, monto]);
-        res.status(201).json(result.rows[0]);
+        const result = await db.query('SELECT * FROM contratos_profesionales WHERE id_contrato = $1', [id]);
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Contrato no encontrado' });
+        }
+        res.json(result.rows[0]);
     } catch (error) {
         console.error(error);
+        res.status(500).json({ error: 'Error al buscar contrato' });
+    }
+};
+
+// 4. CREAR CONTRATO (CORREGIDO)
+exports.createContrato = async (req, res) => {
+    const d = req.body;
+    try {
+        const numContrato = d.numero || `CTR-${Date.now()}`;
+
+        // --- LIMPIEZA DE DATOS (AQUÍ ESTÁ EL TRUCO) ---
+        // Si d.idArea es "" (string vacío) o undefined, le asignamos NULL.
+        // Lo mismo para el supervisor.
+        const idAreaSafe = (d.idArea === "" || d.idArea === "undefined") ? null : d.idArea;
+        const idSupervisorSafe = (d.idSupervisor === "" || d.idSupervisor === "undefined") ? null : d.idSupervisor;
+
+        const sql = `
+            INSERT INTO contratos_profesionales 
+            (numero_contrato, cedula_profesional, nombre_completo_profesional, 
+             honorarios_mensuales, fecha_inicio, fecha_fin, id_direccion_solicitante, 
+             id_usuario_supervisor, objeto_contrato, estado)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'VIGENTE')
+            RETURNING *
+        `;
+        
+        const values = [
+            numContrato, 
+            d.cedula, 
+            d.nombre, 
+            d.honorarios, 
+            d.inicio, 
+            d.fin, 
+            idAreaSafe,       // <--- Usamos la variable limpia
+            idSupervisorSafe, // <--- Usamos la variable limpia
+            d.objeto_contrato
+        ];
+        
+        const result = await db.query(sql, values);
+        res.status(201).json(result.rows[0]);
+    } catch (error) {
+        console.error("Error Crear:", error); // Esto te mostrará el error real en la consola de VS Code
         res.status(500).json({ error: 'Error al crear contrato' });
     }
 };
 
-// POST: Subir Entregable (Lógica de Base de Datos tras subir el archivo físico)
-exports.subirEntregable = async (req, res) => {
-    // req.file contiene la info del archivo subido por Multer
-    // req.body contiene los campos de texto (ej: id_contrato, descripcion)
-    if (!req.file) {
-        return res.status(400).json({ error: 'No se ha subido ningún archivo' });
-    }
-
-    const { id_contrato, descripcion } = req.body;
-    const { filename, originalname, path: filePath, size } = req.file;
-
+// 5. ACTUALIZAR CONTRATO
+exports.updateContrato = async (req, res) => {
+    const { id } = req.params;
+    const d = req.body;
     try {
-        // 1. Insertar en tabla repositorio_archivos (o como se llame tu tabla de archivos)
-        const sqlArchivo = `
-            INSERT INTO repositorio_archivos (nombre_original, nombre_almacenado, ruta, extension, tamano)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id_archivo
-        `;
-        const ext = path.extname(originalname);
-        const resultArchivo = await db.query(sqlArchivo, [originalname, filename, filePath, ext, size]);
-        const idArchivo = resultArchivo.rows[0].id_archivo;
-
-        // 2. Relacionar con el contrato en entregables_contrato
-        const sqlEntregable = `
-            INSERT INTO entregables_contrato (id_contrato, id_archivo, descripcion, fecha_subida)
-            VALUES ($1, $2, $3, NOW())
+        const sql = `
+            UPDATE contratos_profesionales SET
+                nombre_completo_profesional = $1,
+                honorarios_mensuales = $2,
+                fecha_inicio = $3,
+                fecha_fin = $4,
+                id_direccion_solicitante = $5,
+                id_usuario_supervisor = $6,
+                objeto_contrato = $7
+            WHERE id_contrato = $8
             RETURNING *
         `;
-        const resultEntregable = await db.query(sqlEntregable, [id_contrato, idArchivo, descripcion]);
-
-        res.status(201).json({
-            message: 'Entregable subido correctamente',
-            entregable: resultEntregable.rows[0]
-        });
-
+        const values = [d.nombre, d.honorarios, d.inicio, d.fin, d.idArea, d.idSupervisor, d.objeto_contrato, id];
+        
+        const result = await db.query(sql, values);
+        if (result.rowCount === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
+        
+        res.json({ message: 'Actualizado correctamente', contrato: result.rows[0] });
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Error al guardar información del entregable' });
+        console.error("Error Update:", error);
+        res.status(500).json({ error: 'Error al actualizar' });
     }
 };
 
-// DELETE: Eliminar contrato (Borrado lógico)
+// 6. ELIMINAR CONTRATO
 exports.deleteContrato = async (req, res) => {
     const { id } = req.params;
     try {
-        const result = await db.query("UPDATE contratos SET estado = 'INACTIVO' WHERE id_contrato = $1 RETURNING *", [id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
-        res.json({ message: 'Contrato eliminado' });
+        const result = await db.query("DELETE FROM contratos_profesionales WHERE id_contrato = $1", [id]);
+        if (result.rowCount === 0) return res.status(404).json({ error: 'Contrato no encontrado' });
+        res.json({ message: 'Eliminado correctamente' });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Error al eliminar' });
+        res.status(500).json({ error: 'No se puede eliminar (tiene registros asociados)' });
     }
-};
-
-// PUT: Actualizar estado
-exports.updateEstado = async (req, res) => {
-    const { id } = req.params;
-    const { estado } = req.body; // Ej: 'FINALIZADO', 'ACTIVO'
-    try {
-        const result = await db.query('UPDATE contratos SET estado = $1 WHERE id_contrato = $2 RETURNING *', [estado, id]);
-        res.json(result.rows[0]);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Error al actualizar estado' });
-    }
-};
-
-// GET: Obtener entregables de un contrato
-exports.getEntregables = async (req, res) => {
-    const { idContrato } = req.params;
-    try {
-        const sql = `
-            SELECT e.*, r.nombre_original, r.nombre_almacenado
-            FROM entregables_contrato e
-            JOIN repositorio_archivos r ON e.id_archivo = r.id_archivo
-            WHERE e.id_contrato = $1
-            ORDER BY e.fecha_subida DESC
-        `;
-        const result = await db.query(sql, [idContrato]);
-        res.json(result.rows);
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Error al obtener entregables' });
-    }
-};
-
-// GET: Descargar archivo
-exports.descargarArchivo = async (req, res) => {
-    const { nombreArchivo } = req.params;
-    
-    // NOTA: Ajusta esta ruta si tu carpeta 'uploads' está en otro lado
-    const rutaArchivo = path.join(__dirname, '../../uploads', nombreArchivo);
-
-    res.download(rutaArchivo, (err) => {
-        if (err) {
-            console.error("Error en descarga:", err);
-            // Si ya se enviaron cabeceras, no podemos enviar otro error JSON
-            if (!res.headersSent) {
-                res.status(404).json({ error: 'Archivo no encontrado o eliminado' });
-            }
-        }
-    });
 };
