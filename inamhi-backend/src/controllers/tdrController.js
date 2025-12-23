@@ -126,17 +126,37 @@ exports.updateTDR = async (req, res) => {
 exports.deleteTDR = async (req, res) => {
     const { id } = req.params;
     try {
-        // No borramos el registro, solo marcamos eliminado_logico = true
-        const sql = 'UPDATE tdr SET eliminado_logico = true WHERE id_tdr = $1 RETURNING id_tdr';
+        // CAMBIO IMPORTANTE: Usamos DELETE para borrarlo de verdad
+        const sql = 'DELETE FROM tdr WHERE id_tdr = $1 RETURNING id_tdr'; 
+        
         const result = await db.query(sql, [id]);
 
         if (result.rowCount === 0) {
             return res.status(404).json({ error: 'TDR no encontrado' });
         }
 
-        res.json({ message: 'TDR eliminado correctamente' });
+        res.json({ message: 'TDR eliminado permanentemente de la base de datos' });
     } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Error al eliminar TDR' });
+        // OJO: Si el TDR ya tiene contratos creados, la base de datos podría impedirte borrarlo
+        // por seguridad (Foreign Key Constraint).
+        res.status(500).json({ error: 'Error al eliminar: Es posible que este TDR tenga datos asociados.' });
+    }
+};
+// 6. OBTENER TDR POR ID (AGREGA ESTO AL FINAL)
+exports.getTdrById = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const sql = 'SELECT * FROM tdr WHERE id_tdr = $1';
+        const result = await db.query(sql, [id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'TDR no encontrado' });
+        }
+
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al buscar TDR por ID' });
     }
 };

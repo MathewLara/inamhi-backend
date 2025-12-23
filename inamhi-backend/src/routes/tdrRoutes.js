@@ -7,8 +7,9 @@ router.get('/catalogos', tdrController.getCatalogos);
 
 // Rutas CRUD
 router.get('/', tdrController.getTDRs);
+router.get('/:id', tdrController.getTdrById); // <--- ¡ESTA ES LA QUE FALTA! AGRÉGALA
 router.post('/', tdrController.createTDR);
-router.put('/:id', tdrController.updateTDR);    // <-- NUEVO: Para editar
-router.delete('/:id', tdrController.deleteTDR); // <-- NUEVO: Para eliminar
+router.put('/:id', tdrController.updateTDR);
+router.delete('/:id', tdrController.deleteTDR);
 
 module.exports = router;
