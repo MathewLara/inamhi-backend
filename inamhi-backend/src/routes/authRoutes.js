@@ -2,9 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authController = require('../controllers/authController');
 
-router.post('/login', authController.login);
-router.post('/register', authController.registrarUsuario); // <--- NUEVA RUTA SEGURA
-
-// router.get('/crear-admin', ...); // Esta ya no la necesitas tanto, pero puedes dejarla.
+// Asegúrate de que apunte a .login
+router.post('/login', authController.login); 
 
 module.exports = router;

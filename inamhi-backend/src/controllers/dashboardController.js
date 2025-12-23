@@ -2,21 +2,27 @@ const db = require('../config/db');
 
 exports.getResumen = async (req, res) => {
     try {
-        // 1. Contamos cuántos contratos hay en total
+        // 1. Contamos Contratos Profesionales
         const sqlContratos = 'SELECT COUNT(*) FROM contratos_profesionales';
-        const respuestaContratos = await db.query(sqlContratos);
+        const resContratos = await db.query(sqlContratos);
         
-        // 2. Aquí prepararemos los otros contadores (TDR, Mantenimiento) en el futuro
-        // Por ahora los dejamos en 0 hasta que crees esas tablas
+        // 2. Contamos TDRs (Tu tabla se llama 'tdr' en singular)
+        const sqlTdrs = 'SELECT COUNT(*) FROM tdr';
+        const resTdrs = await db.query(sqlTdrs);
+
+        // 3. Contamos Mantenimientos (Tu tabla es 'soporte_mantenimientos')
+        const sqlMantenimientos = 'SELECT COUNT(*) FROM soporte_mantenimientos';
+        const resMantenimientos = await db.query(sqlMantenimientos);
         
+        // Enviamos los datos con los nombres que espera tu dashboard.ts
         res.json({
-            totalContratos: respuestaContratos.rows[0].count,
-            totalTDRs: 0,         // Pendiente
-            totalMantenimientos: 0 // Pendiente
+            totalContratos: parseInt(resContratos.rows[0].count),
+            totalTdrs: parseInt(resTdrs.rows[0].count),
+            totalMantenimientos: parseInt(resMantenimientos.rows[0].count)
         });
 
     } catch (error) {
-        console.error(error);
+        console.error("Error en dashboardController:", error);
         res.status(500).json({ error: 'Error al obtener resumen del dashboard' });
     }
 };
